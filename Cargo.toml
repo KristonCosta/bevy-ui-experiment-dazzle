@@ -6,3 +6,6 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 bevy = "0.8"
+bevy-inspector-egui = "0.12"
+bevy_flycam = "0.8"
+bevy_mod_picking = "0.9"
