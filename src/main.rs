@@ -4,10 +4,10 @@
 // Feel free to delete this line.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
-use std::{collections::HashMap, marker, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use bevy::prelude::*;
-use bevy_flycam::{FlyCam, NoCameraPlayerPlugin};
+use bevy_flycam::{FlyCam, MovementSettings, NoCameraPlayerPlugin};
 use bevy_inspector_egui::{
     widgets::ResourceInspector, Inspectable, InspectorPlugin, RegisterInspectable,
 };
@@ -36,7 +36,11 @@ pub struct Celestial {
 pub struct Universe {
     active: bool,
     gravitational_constant: f32,
+    #[inspectable(min = 1, max = 1000)]
     update_frequency_ms: u64,
+    #[inspectable(min = 1, max = 1000)]
+    simulation_step_ms: u64,
+    #[inspectable(min = 1, max = 5000)]
     debug_steps: u32,
 }
 
@@ -48,9 +52,10 @@ struct UniverseInspector {
 impl Default for Universe {
     fn default() -> Self {
         Self {
-            gravitational_constant: 0.05,
+            gravitational_constant: 0.0001,
             active: false,
             update_frequency_ms: 34,
+            simulation_step_ms: 16,
             debug_steps: 1000,
         }
     }
@@ -80,9 +85,12 @@ fn handle_delta(
     mut universe_tick_writer: EventWriter<UniverseTickEvent>,
 ) {
     if universe_timer.timer.tick(time.delta()).finished() {
+        universe_timer
+            .timer
+            .set_duration(Duration::from_millis(constants.update_frequency_ms));
         universe_timer.timer.reset();
         universe_tick_writer.send(UniverseTickEvent(
-            1.0 / constants.update_frequency_ms as f32,
+            constants.simulation_step_ms as f32 / 1000.0,
         ))
     }
 }
@@ -101,7 +109,7 @@ fn update_celestial_bodies_event_reader(
         }
     } else if keys.just_pressed(KeyCode::T) {
         // Hack to force tick
-        let event = UniverseTickEvent(1.0 / constants.update_frequency_ms as f32);
+        let event = UniverseTickEvent(constants.simulation_step_ms as f32 / 1000.0);
         Some(event)
     } else {
         None
@@ -192,6 +200,41 @@ fn calculate_dt_velocity(
     force_direction * gravitational_constant * that_mass / square_distance
 }
 
+struct DebugManager {
+    refresh: bool,
+    active: bool,
+}
+
+impl Default for DebugManager {
+    fn default() -> Self {
+        Self {
+            refresh: false,
+            active: true,
+        }
+    }
+}
+
+fn should_update_debug_points(
+    changed: Query<
+        Entity,
+        (
+            Or<(Changed<Celestial>, Changed<Transform>)>,
+            Without<DebugMarker>,
+            With<Celestial>,
+        ),
+    >,
+    key: Res<Input<KeyCode>>,
+    mut manager: ResMut<DebugManager>,
+) {
+    if key.just_pressed(KeyCode::Q) {
+        manager.active = true;
+    }
+    if !key.just_pressed(KeyCode::Q) && changed.is_empty() {
+        return;
+    }
+    manager.refresh = true;
+}
+
 fn generate_debug_points(
     key: Res<Input<KeyCode>>,
     mut commands: Commands,
@@ -200,19 +243,22 @@ fn generate_debug_points(
     celestial_bodies: Query<(Entity, &mut Celestial, &mut Transform), Without<DebugMarker>>,
     mut old_debug_markers: Query<(Entity, &mut Transform), With<DebugMarker>>,
     material: Query<&Handle<StandardMaterial>>,
+    mut manager: ResMut<DebugManager>,
 ) {
-    if !key.just_pressed(KeyCode::D) {
-        return;
-    }
     if key.just_pressed(KeyCode::C) {
         for (entity, _) in old_debug_markers.iter() {
             commands.entity(entity).despawn();
         }
+        manager.active = false;
         return;
     }
+    if !manager.refresh || !manager.active {
+        return;
+    }
+    manager.refresh = false;
     let mut celestial_map = build_celestial_maps(&celestial_bodies);
     let mut positions = Vec::new();
-    let tick = UniverseTickEvent(1.0 / constants.update_frequency_ms as f32);
+    let tick = UniverseTickEvent(constants.simulation_step_ms as f32 / 1000.0);
     for _ in 0..constants.debug_steps {
         let velocities = calculate_celestial_velocities(&tick, &constants, &celestial_map);
         for (entity, bundle) in celestial_map.map.iter_mut() {
@@ -255,7 +301,7 @@ fn generate_debug_marker(
     commands
         .spawn_bundle(PbrBundle {
             mesh: meshes.add(Mesh::from(shape::Icosphere {
-                radius: 0.01,
+                radius: 0.5,
                 subdivisions: 1,
             })),
             material,
@@ -282,10 +328,12 @@ impl Plugin for UniversePlugin {
         };
         app.insert_resource(Universe::default())
             .insert_resource(timer)
+            .insert_resource(DebugManager::default())
             .add_event::<UniverseTickEvent>()
             .add_system(handle_delta)
             .add_system(universe_toggle)
-            .add_system(update_celestial_bodies_event_reader);
+            .add_system(update_celestial_bodies_event_reader)
+            .add_system(should_update_debug_points);
     }
 }
 
@@ -296,6 +344,10 @@ fn main() {
         .add_plugin(InspectorPlugin::<UniverseInspector>::new())
         .add_plugin(ReflectionPlugin)
         .add_plugin(NoCameraPlayerPlugin)
+        .insert_resource(MovementSettings {
+            speed: 200.0,
+            ..Default::default()
+        })
         .add_plugin(UniversePlugin)
         .add_plugins(DefaultPickingPlugins)
         .add_startup_system(setup)
@@ -331,7 +383,7 @@ fn setup_universe(
     commands
         .spawn_bundle(PbrBundle {
             mesh: meshes.add(Mesh::from(shape::Icosphere {
-                radius: 0.1,
+                radius: 12.0,
                 subdivisions: 3,
             })),
             material: materials.add(Color::RED.into()),
@@ -342,7 +394,7 @@ fn setup_universe(
             name: "Left".to_string(),
         })
         .insert(Celestial {
-            mass: 100.0,
+            mass: 1000000.0,
             velocity: Vec3::ZERO,
         })
         .insert_bundle(PickableBundle::default());
@@ -350,38 +402,38 @@ fn setup_universe(
     commands
         .spawn_bundle(PbrBundle {
             mesh: meshes.add(Mesh::from(shape::Icosphere {
-                radius: 0.1,
+                radius: 3.0,
                 subdivisions: 3,
             })),
             material: materials.add(Color::CYAN.into()),
-            transform: Transform::from_xyz(10.0, 0.1, 0.0),
+            transform: Transform::from_xyz(100.0, 0.1, 0.0),
             ..Default::default()
         })
         .insert(Name {
             name: "Right".to_string(),
         })
         .insert(Celestial {
-            mass: 1.0,
-            velocity: Vec3::new(0.0, 0.0, 100.0),
+            mass: 100.0,
+            velocity: Vec3::new(0.0, 0.0, 3.2),
         })
         .insert_bundle(PickableBundle::default());
 
     commands
         .spawn_bundle(PbrBundle {
             mesh: meshes.add(Mesh::from(shape::Icosphere {
-                radius: 0.1,
+                radius: 1.0,
                 subdivisions: 3,
             })),
             material: materials.add(Color::GREEN.into()),
-            transform: Transform::from_xyz(0.0, 0.3, -10.0),
+            transform: Transform::from_xyz(105.0, 0.1, 0.0),
             ..Default::default()
         })
         .insert(Name {
             name: "Right".to_string(),
         })
         .insert(Celestial {
-            mass: 1.0,
-            velocity: Vec3::new(100.0, 0.0, 0.0),
+            mass: 2.0,
+            velocity: Vec3::new(0.0, 0.0, 2.7),
         })
         .insert_bundle(PickableBundle::default());
 }
@@ -389,7 +441,7 @@ fn setup_universe(
 fn setup(mut commands: Commands) {
     commands
         .spawn_bundle(Camera3dBundle {
-            transform: Transform::from_xyz(0.0, 5.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
+            transform: Transform::from_xyz(0.0, 500.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         })
         .insert(FlyCam)
